@@ -1,0 +1,599 @@
+from __future__ import print_function
+
+import glob
+import sys
+import re
+import time
+import numpy as np
+import gdas_match as _gm
+import h5netcdf.legacyapi as hnCDF4
+from ai_io import write_ai
+from preclassify_surface import preclassify_surface as pc_sfc
+
+REAL32_UNDEF = -9999
+INT32_UNDEF = -9999
+
+def read_instrconfig(instrConfigFile):
+    #---read MiRS Instrument Config File
+    with open(instrConfigFile, 'r') as fid:
+       rLine = fid.readline()
+       nChan = int(rLine[25::])
+       print("nChan = ", nChan)
+       nChanCnt = 0
+       InstrConfig_Frequency = np.zeros((nChan), dtype=np.float32)
+       for iLine, rLine in enumerate(fid):
+          rLineTrim = rLine.strip() #[25::]
+          #---parse line for frequencies
+          fLine = [float(s) for s in re.findall(r'-?\d+\.?\d*', rLineTrim)]
+          ind = np.arange(nChanCnt, nChanCnt+len(fLine))
+          if (nChanCnt == nChan): break
+          InstrConfig_Frequency[ind] = fLine
+          nChanCnt += len(fLine)
+    return nChan, InstrConfig_Frequency 
+
+def seconds_to_calendar(Time):
+
+ from datetime import datetime  
+ from datetime import timedelta
+ 
+ #---convert time to calendar date
+ dateTime = datetime(1970, 1, 1, 0, 0, 0) + timedelta(seconds=Time/1000.)
+ year = dateTime.year
+ month = dateTime.month
+ day = dateTime.day
+ hour = dateTime.hour
+ minute = dateTime.minute
+ second = dateTime.second
+
+ UTC = second + 60.*minute + 3600.*hour 
+
+ julday = int(dateTime.strftime("%j"))
+
+ return year, month, day, hour, minute, second, julday, UTC
+
+def radiance_to_tb(Frequency, Radiance):
+ one = 1.0
+ zero = 0.0
+ scale_factor = 1.0
+ boltzmns = 1.3806503e-16 
+ plancks = 6.62606876e-27 
+ clight = 2.99792458e+10     
+ c_1 = 2.0*plancks*clight*clight
+ c_2 = plancks*clight/boltzmns 
+
+ x_c_1 = c_1 * (Frequency*Frequency*Frequency)
+ x_c_2 = c_2 * Frequency
+
+ nfor, nfov, nchan = Radiance.shape
+ #print(Radiance.shape)
+ #Logarithm = np.zeros((nfor, nfov), dtype=np.float32)
+ Temperature = np.zeros((nfor, nfov, nchan),dtype= np.float32)
+
+ for ic, Freq in enumerate(Frequency):
+   Logarithm = np.log(( scale_factor * x_c_1[ic] / Radiance[:,:,ic] ) + one )
+   Temperature[:, :, ic] = x_c_2[ic] / Logarithm
+
+ return Temperature 
+
+def read_nucaps_netcdfs(NetCDFFiles):
+ nFiles = len(NetCDFFiles)
+ nTotCount = 0
+ for iFile, NetCDFFile in enumerate(NetCDFFiles):
+   #print('...Reading Input NetCDFFile: ' ,NetCDFFile)
+   tic = time.time()
+   Number_of_CrIS_FORs1, Number_of_CrIS_FOVs, Number_of_CrIS_Channels, Number_of_ATMS_Channels, \
+    CrIS_FORs1, CrIS_FOVs1, Time1, Cloud_Fraction1, Cloud_Height1, Land_Fraction1, Ascending_Descending1, \
+    ATMS_Frequencies, ATMS_Latitude1, ATMS_Longitude1, ATMS_Satellite_Zenith1, ATMS_Satellite_Azimuth1, \
+    ATMS_Brightness_Temps1, ATMS_QF1, ATMS_QF2,  \
+    CrIS_Frequencies, CrIS_Latitude1, CrIS_Longitude1, CrIS_Satellite_Zenith1, CrIS_Satellite_Azimuth1, \
+    CrIS_Brightness_Temps1, CrIS_Solar_Zenith1, CrIS_Solar_Azimuth1 = read_nucaps_netcdf(NetCDFFile)
+   toc = time.time()
+#   print("time = ", toc - tic)
+#   print("time = ", toc - tic)
+   if iFile == 0:
+    nTotFORs = Number_of_CrIS_FORs1 * nFiles
+    CrIS_Latitude = np.zeros((nTotFORs, Number_of_CrIS_FOVs), dtype=np.float32)
+    CrIS_Longitude = np.zeros((nTotFORs, Number_of_CrIS_FOVs), dtype=np.float32)
+    CrIS_Satellite_Zenith = np.zeros((nTotFORs, Number_of_CrIS_FOVs), dtype=np.float32)
+    CrIS_Satellite_Azimuth = np.zeros((nTotFORs, Number_of_CrIS_FOVs), dtype=np.float32)
+
+    CrIS_Solar_Zenith = np.zeros((nTotFORs, Number_of_CrIS_FOVs), dtype=np.float32)
+    CrIS_Solar_Azimuth = np.zeros((nTotFORs, Number_of_CrIS_FOVs), dtype=np.float32)
+    CrIS_Brightness_Temps = np.zeros((nTotFORs, Number_of_CrIS_FOVs,Number_of_CrIS_Channels), dtype=np.float32)
+    ATMS_Brightness_Temps = np.zeros((nTotFORs, Number_of_ATMS_Channels), dtype=np.float32)
+    ATMS_QF1s             = np.zeros((nTotFORs, Number_of_ATMS_Channels), dtype=np.int)
+    ATMS_QF2s             = np.zeros((nTotFORs, Number_of_ATMS_Channels), dtype=np.int)
+    
+    CrIS_FORs = np.zeros((nTotFORs, Number_of_CrIS_FOVs), dtype=np.int32)
+    CrIS_FOVs = np.zeros((nTotFORs, Number_of_CrIS_FOVs), dtype=np.int32)
+    Time      = np.zeros((nTotFORs, Number_of_CrIS_FOVs), dtype=np.float64)
+    Cloud_Fraction = np.zeros((nTotFORs, Number_of_CrIS_FOVs), dtype=np.float32)
+    Cloud_Height = np.zeros((nTotFORs, Number_of_CrIS_FOVs), dtype=np.float32)
+    Land_Fraction = np.zeros((nTotFORs, Number_of_CrIS_FOVs), dtype=np.float32)
+    Ascending_Descending = np.zeros((nTotFORs, Number_of_CrIS_FOVs), dtype=np.int32)
+    ATMS_Latitude   = np.zeros((nTotFORs), dtype=np.float32)
+    ATMS_Longitude  = np.zeros((nTotFORs), dtype=np.float32)
+    ATMS_Satellite_Zenith = np.zeros((nTotFORs), dtype=np.float32)
+    ATMS_Satellite_Azimuth = np.zeros((nTotFORs), dtype=np.float32)
+    Number_of_CrIS_FORs = 0
+    
+   ind = np.arange(nTotCount, nTotCount+Number_of_CrIS_FORs1)
+   #print np.min(ind), np.max(ind), nTotCount
+   Number_of_CrIS_FORs = Number_of_CrIS_FORs1     + Number_of_CrIS_FORs       
+   
+   CrIS_FORs[ind,:] = CrIS_FORs1
+   CrIS_FOVs[ind,:] = CrIS_FOVs1
+   Time[ind,:] = Time1
+   Cloud_Fraction[ind,:] = Cloud_Fraction1
+   Cloud_Height[ind,:] = Cloud_Height1
+   Land_Fraction[ind,:] = Land_Fraction1
+   Ascending_Descending[ind,:] = Ascending_Descending1
+   ATMS_Latitude[ind] = ATMS_Latitude1
+   ATMS_Longitude[ind] = ATMS_Longitude1
+   ATMS_Satellite_Zenith[ind] = ATMS_Satellite_Zenith1
+   ATMS_Satellite_Azimuth[ind] = ATMS_Satellite_Azimuth1
+   ATMS_Brightness_Temps[ind,:] = ATMS_Brightness_Temps1
+   ATMS_QF1s[ind,:] = ATMS_QF1
+   ATMS_QF2s[ind,:] = ATMS_QF2
+   CrIS_Latitude[ind,:] = CrIS_Latitude1
+   CrIS_Longitude[ind,:] = CrIS_Longitude1
+   CrIS_Satellite_Zenith[ind,:] = CrIS_Satellite_Zenith1
+   CrIS_Satellite_Azimuth[ind,:] = CrIS_Satellite_Azimuth1
+   CrIS_Brightness_Temps[ind,:,:] = CrIS_Brightness_Temps1
+   CrIS_Solar_Zenith[ind,:] = CrIS_Solar_Zenith1
+   CrIS_Solar_Azimuth[ind,:] = CrIS_Solar_Azimuth1
+   nTotCount = nTotCount + Number_of_CrIS_FORs1
+  
+ return  Number_of_CrIS_FORs, Number_of_CrIS_FOVs, Number_of_CrIS_Channels, Number_of_ATMS_Channels,\
+     CrIS_FORs, CrIS_FOVs, Time, Cloud_Fraction, Cloud_Height, Land_Fraction, Ascending_Descending, \
+     ATMS_Frequencies, ATMS_Latitude, ATMS_Longitude, ATMS_Satellite_Zenith, ATMS_Satellite_Azimuth, \
+     ATMS_Brightness_Temps, ATMS_QF1s, ATMS_QF2s, \
+     CrIS_Frequencies, CrIS_Latitude, CrIS_Longitude, CrIS_Satellite_Zenith, CrIS_Satellite_Azimuth, \
+     CrIS_Brightness_Temps, CrIS_Solar_Zenith, CrIS_Solar_Azimuth
+   
+def read_nucaps_netcdf(NetCDFFile):
+
+# rg = Dataset(NetCDFFile, 'r', format='NETCDF4')
+ rg = hnCDF4.Dataset(NetCDFFiles[0], 'r')
+# Number_of_CrIS_FORs     = rg.dimensions['Number_of_CrIS_FORs'].size
+# Number_of_CrIS_FOVs     = rg.dimensions['Number_of_CrIS_FOVs'].size
+# Number_of_CrIS_Channels = rg.dimensions['Number_of_CrIS_Channels'].size
+# Number_of_ATMS_Channels = rg.dimensions['Number_of_ATMS_Channels'].size
+
+ CrIS_FORs = rg.variables['CrIS_FORs'][:,:]
+ CrIS_FOVs = rg.variables['CrIS_FOVs'][:,:]
+ Time      = rg.variables['Time'][:,:]
+ Cloud_Fraction         = rg.variables['Cloud_Fraction'][:,:]
+ Cloud_Height           = rg.variables['Cloud_Height'][:,:]
+
+ Land_Fraction          = rg.variables['Land_Fraction'][:,:]
+ Ascending_Descending   = rg.variables['Ascending_Descending'][:,:]
+
+ ATMS_Frequencies       = rg.variables['ATMS_Frequencies'][:]
+ ATMS_Satellite_Zenith  = rg.variables['ATMS_Satellite_Zenith'][:]
+ ATMS_Satellite_Azimuth = rg.variables['ATMS_Satellite_Azimuth'][:]
+ ATMS_Satellite_Height  = rg.variables['ATMS_Satellite_Height'][:]
+ ATMS_Latitude          = rg.variables['ATMS_Latitude'][:]
+ ATMS_Longitude         = rg.variables['ATMS_Longitude'][:]
+ ATMS_Brightness_Temps  = rg.variables['ATMS_Brightness_Temps'][:,:]
+
+ CrIS_Frequencies       = rg.variables['CrIS_Frequencies'][:]
+ CrIS_Satellite_Zenith  = rg.variables['Satellite_Zenith'][:,:]
+ CrIS_Satellite_Azimuth = rg.variables['Satellite_Azimuth'][:,:]
+
+ CrIS_Solar_Zenith      = rg.variables['Solar_Zenith'][:,:]
+ CrIS_Solar_Azimuth     = rg.variables['Solar_Azimuth'][:,:]
+
+ CrIS_Satellite_Height  = rg.variables['Satellite_Height'][:,:]
+ CrIS_Latitude          = rg.variables['CrIS_Latitude'][:,:]
+ CrIS_Longitude         = rg.variables['CrIS_Longitude'][:,:]
+ CrIS_Radiances         = rg.variables['CrIS_Radiances'][:,:,:]
+
+ ATMS_QF1               = rg.variables['ATMS_QF1'][:,:]
+ ATMS_QF2               = rg.variables['ATMS_QF2'][:,:]
+
+ Number_of_CrIS_FORs, Number_of_CrIS_FOVs, Number_of_CrIS_Channels = CrIS_Radiances.shape 
+ Number_Of_CrIS_FORs, Number_of_ATMS_Channels = ATMS_Brightness_Temps.shape 
+ 
+ #---convert CrIS radiances to Brightness Temperatures
+ CrIS_Brightness_Temps  = radiance_to_tb(CrIS_Frequencies,CrIS_Radiances)
+ 
+ rg.close()
+ return  Number_of_CrIS_FORs,  Number_of_CrIS_FOVs,  Number_of_CrIS_Channels,  Number_of_ATMS_Channels,\
+     CrIS_FORs, CrIS_FOVs, Time, Cloud_Fraction, Cloud_Height, Land_Fraction, Ascending_Descending, \
+     ATMS_Frequencies, ATMS_Latitude, ATMS_Longitude, ATMS_Satellite_Zenith, ATMS_Satellite_Azimuth, \
+     ATMS_Brightness_Temps, ATMS_QF1, ATMS_QF2, \
+     CrIS_Frequencies, CrIS_Latitude, CrIS_Longitude, CrIS_Satellite_Zenith, CrIS_Satellite_Azimuth, \
+     CrIS_Brightness_Temps, CrIS_Solar_Zenith, CrIS_Solar_Azimuth
+
+def get_frequency_match(NCrIS_Channels,Frequency,NInstrConfig_Channels,InstrConfig_Frequency):
+
+  if (NInstrConfig_Channels > NCrIS_Channels): 
+    print('Something wrong')
+    quit()
+
+  Index_IC = np.zeros((NInstrConfig_Channels), dtype=np.int32)
+  for Channel_Index, Freq_IC in enumerate(InstrConfig_Frequency):
+    ic = np.argmin(np.abs(Freq_IC - Frequency))
+    Index_IC[Channel_Index] = ic 
+  return Index_IC
+
+def interpolate_gdas(gdas_match,satellite_latitude,satellite_longitude):
+
+   idx_real = np.arange(satellite_latitude.shape[0])
+   #---interpolation at 360, 0 boundary within 360 - gdas grid max longitude
+   #   is nearest to max longitude
+   x1 = gdas_match.x1 
+   idx_padd = (satellite_longitude >= x1)
+   satellite_longitude[idx_padd] = x1-0.01 
+
+   #---get interpolation weights for satellite locations 
+   gdas_match.interpolate_xy_setup(satellite_latitude,satellite_longitude)
+
+   #---interpolate and convert surface pressure to mb
+   surface_pressure = gdas_match.interpolate_xy_single(gdas_match.gdas_data['ps'])*1.e-2
+
+   #---interpolate surface temperature
+   surface_temperature = gdas_match.interpolate_xy_single(gdas_match.gdas_data['tskin'])
+   min_tsurf = np.min(gdas_match.gdas_data['tskin'])
+   max_tsurf = np.max(gdas_match.gdas_data['tskin'])
+   #   print("TSURF RANGE N=", (surface_temperature < min_tsurf).sum(), (surface_temperature > max_tsurf).sum(), \
+       #         (surface_temperature < min_tsurf).sum()+(surface_temperature > max_tsurf).sum())
+   #   idx = (surface_temperature < min_tsurf) | (surface_temperature > max_tsurf)
+   #   print("LATITUDE = ", satellite_latitude[idx])
+   #   print("LONGITUDE = ", satellite_longitude[idx])
+
+   #print("TSURF = ",np.min(surface_temperature),np.max(surface_temperature),\
+   #      np.min(gdas_match.gdas_data['tskin']),np.max(gdas_match.gdas_data['tskin']))
+
+   #print 'surface_pressure = ', surface_pressure.shape, np.min(gdas_match.gdas_data['ps'])*1e-2, np.max(gdas_match.gdas_data['ps'])*1e-2
+   #---interpolate surface type parameters
+   sea_ice       = gdas_match.interpolate_xy_single(gdas_match.gdas_data['ice'])
+   snow_depth    = gdas_match.interpolate_xy_single(gdas_match.gdas_data['snow'])
+   land_fraction = gdas_match.interpolate_xy_single(gdas_match.gdas_data['lfrac'])
+   #print("SEA_ICE = ", np.min(sea_ice), np.max(sea_ice), \
+   #      np.min(gdas_match.gdas_data['ice']), np.max(gdas_match.gdas_data['ice']))
+   #print("SNW_DPT = ", np.min(snow_depth), np.max(snow_depth), np.min(gdas_match.gdas_data['snow']), np.max(gdas_match.gdas_data['snow']))
+   #---classify land, ocean, sea ice, snow based on GDAS surface parameters
+   oc_type = 0; ld_type = 2; si_type = 1; sn_type = 3
+   seaice_fraction_limit = 0.01
+   snow_depth_limit      = 0.001
+   land_fraction_limit   = 0.001
+   sfctype = np.zeros((surface_pressure.shape), dtype=np.int32) + oc_type
+   sfctype[(land_fraction > land_fraction_limit)] = ld_type
+   #   sfctype[(sea_ice > seaice_fraction_limit)] = si_type
+   #   sfctype[(snow_depth > snow_depth_limit)] = sn_type
+
+   print("OC =", (sfctype == oc_type).sum())
+   print("LD =", (sfctype == ld_type).sum())
+   print("SI =", (sfctype == si_type).sum())
+   print("SN =", (sfctype == sn_type).sum())
+
+   Index_Bad_Data = ((satellite_latitude < -90) | (satellite_longitude < -180))
+
+   surface_pressure[Index_Bad_Data] = REAL32_UNDEF
+   sfctype[Index_Bad_Data] = INT32_UNDEF
+   surface_temperature[Index_Bad_Data] = INT32_UNDEF
+
+   #surface_pressure = surface_pressure[idx_real]
+   #surface_temperature = surface_temperature[idx_real]
+   #sfctype = sfctype[idx_real]
+
+   return surface_pressure, sfctype, surface_temperature 
+
+def read_channelset_file(channelSetFile):
+  ind = np.loadtxt(channelSetFile)
+  ChanSet_Index = (ind == 1)
+  return ChanSet_Index
+
+def main(NetCDFFiles,instrConfigFile,gdas_type,gdas_dump_dir,channelSetFile,AIFileOut,debug=False):
+   
+  #
+  tic = time.time()
+  
+  ###############
+  #---read NUCAPS NetCDF file 
+  Number_of_CrIS_FORs,  Number_of_CrIS_FOVs,  Number_of_CrIS_Channels,  Number_of_ATMS_Channels, \
+  CrIS_FORs, CrIS_FOVs, Time, Cloud_Fraction, Cloud_Height, Land_Fraction, Ascending_Descending, \
+     ATMS_Frequencies, ATMS_Latitude, ATMS_Longitude, ATMS_Satellite_Zenith, ATMS_Satellite_Azimuth, \
+     ATMS_Brightness_Temps, ATMS_QF1, ATMS_QF2, \
+     CrIS_Frequencies, CrIS_Latitude, CrIS_Longitude, CrIS_Satellite_Zenith, CrIS_Satellite_Azimuth, \
+     CrIS_Brightness_Temps, CrIS_Solar_Zenith, CrIS_Solar_Azimuth = read_nucaps_netcdfs(NetCDFFiles)
+
+  toc_read = time.time()
+  print('Read file elapsed = %7.2f' % ((toc_read - tic)/60))
+
+  #---Longitude (-180, 180) -> (0, 360)
+  ATMS_Longitude[(ATMS_Longitude < 0)] = ATMS_Longitude[(ATMS_Longitude < 0)] + 360.
+  CrIS_Longitude[(CrIS_Longitude < 0)] = CrIS_Longitude[(CrIS_Longitude < 0)] + 360.
+
+  Satellite_Year  = np.zeros((Number_of_CrIS_FORs,Number_of_CrIS_FOVs), dtype=np.int32)
+  Satellite_Month = np.zeros((Number_of_CrIS_FORs,Number_of_CrIS_FOVs), dtype=np.int32)
+  Satellite_Day   = np.zeros((Number_of_CrIS_FORs,Number_of_CrIS_FOVs), dtype=np.int32)
+  Satellite_Hour  = np.zeros((Number_of_CrIS_FORs,Number_of_CrIS_FOVs), dtype=np.int32)
+  Satellite_Minute = np.zeros((Number_of_CrIS_FORs,Number_of_CrIS_FOVs), dtype=np.int32)
+  Satellite_Second = np.zeros((Number_of_CrIS_FORs,Number_of_CrIS_FOVs), dtype=np.int32)
+  Satellite_UTC   = np.zeros((Number_of_CrIS_FORs,Number_of_CrIS_FOVs), dtype=np.int32)
+  Satellite_Julday   = np.zeros((Number_of_CrIS_FORs,Number_of_CrIS_FOVs), dtype=np.int32)
+  #print Time.shape, CrIS_FORs.shape, CrIS_Brightness_Temps.shape, CrIS_Longitude.shape
+  for iFOR in range(0,Number_of_CrIS_FORs):
+    for iFOV in range(0,Number_of_CrIS_FOVs):
+       if np.isnan(Time[iFOR,iFOV]): continue 
+       year, month, day, hour, minute, second, julday, UTC = seconds_to_calendar(Time[iFOR,iFOV])
+       Satellite_Year[iFOR,iFOV] = year
+       Satellite_Month[iFOR,iFOV] = month 
+       Satellite_Day[iFOR,iFOV] = day
+       Satellite_Hour[iFOR,iFOV] = hour
+       Satellite_Minute[iFOR,iFOV] = minute
+       Satellite_Second[iFOR,iFOV] = second
+       Satellite_Julday[iFOR,iFOV] = julday
+       Satellite_UTC[iFOR,iFOV] = UTC
+       #       gdas_date, gdas_year, gdas_month, gdas_day, gdas_hour, gdas_filename =  get_gdas_fileinfo(\                                                                           #                     year,month,day,hour,gdas_dump_dir,gdas_resolution)
+
+  ###############
+  #---read CrIS instrument config file 
+  Number_of_InstrConfig_Channels, InstrConfig_Frequency = read_instrconfig(instrConfigFile)
+
+  #---remove guard channels and/or select channels from superset - (e.g. 2211 channel set)
+  InstrConfig_Index = get_frequency_match(Number_of_CrIS_Channels,CrIS_Frequencies,Number_of_InstrConfig_Channels,InstrConfig_Frequency)
+  CrIS_Frequencies = CrIS_Frequencies[InstrConfig_Index]
+  CrIS_Brightness_Temps = CrIS_Brightness_Temps[:,:,InstrConfig_Index]
+  Number_of_CrIS_Channels = Number_of_InstrConfig_Channels
+
+  #---read channel subset file 
+  ChanSet_Index = read_channelset_file(channelSetFile)
+  CrIS_Frequencies = CrIS_Frequencies[ChanSet_Index]
+  CrIS_Brightness_Temps = CrIS_Brightness_Temps[:,:,ChanSet_Index]
+  Number_of_CrIS_Channels = len(CrIS_Frequencies)
+ 
+  ###############
+  #---co-locate to GDAS dump surface pressure and surface_type
+  ###############
+
+  #---compute the mean time of the granule for good points - this is used to select
+  #   which analysis file that gets used
+  #   note: interpolation of GDAS in this incarnation is spline in spatial dimension 
+  #         and nearest neighbor in time (06hr analysis).  File list should be 
+  #         split out into +/- 3 hour windows around 00z,06z,12z,18z.
+  #
+  # gdas_match_struct.get_gdas_fileinfo :: sets file 
+  # if we want to mix f000 with f003 we can split it into +/- 1.5 hour windows
+
+  Time_Avg = np.nanmean(Time[(Time > 0)])
+  avg_year, avg_month, avg_day, avg_hour, avg_minute, avg_second, avg_julday, avg_UTC = seconds_to_calendar(Time_Avg)
+ 
+  #---initial gdas data and read gdas dump file
+  tic_gdas = time.time()
+  gdas_match_struct = _gm.gdas_match(gdas_type,gdas_dump_dir)
+  gdas_match_struct.get_gdas_fileinfo(avg_year,avg_month,avg_day,avg_hour)
+  gdas_match_struct.gdas_read()
+  toc_gdas = time.time()
+  print('GDAS file elapsed = %7.2f' % ((toc_gdas - tic_gdas)/60))
+  
+  tic_gdas = time.time()
+  #---co-locate to the satellite
+  ATMS_gdas_surface_pressure, ATMS_gdas_surface_type, ATMS_gdas_surface_temperature = interpolate_gdas(gdas_match_struct,ATMS_Latitude,ATMS_Longitude)
+
+  print("Nans=", ATMS_Longitude.shape, np.isnan(ATMS_Longitude).sum())
+  #---Central Frequencies ct five window channel for surface
+  freqw = [23.8, 31.4, 50.3, 88.2, 165.5]
+  index_sfc = []
+  for ich in range(Number_of_ATMS_Channels):
+    df = np.min(np.abs(freqw - ATMS_Frequencies[ich]))
+    if (df < 0.25): index_sfc.append(ich)
+  index_sfc = np.array(index_sfc).astype(int)
+  for iFOR in range(Number_of_CrIS_FORs):
+    tb = ATMS_Brightness_Temps[iFOR,index_sfc]
+    if np.isnan(ATMS_Latitude[iFOR]) | np.isnan(ATMS_Longitude[iFOR]): continue
+    sfctype = pc_sfc(avg_year,avg_month,tb,ATMS_Latitude[iFOR],
+                     ATMS_Longitude[iFOR],ATMS_gdas_surface_type[iFOR],ATMS_gdas_surface_temperature[iFOR])
+    ATMS_gdas_surface_type[iFOR] = sfctype
+
+  toc_gdas = time.time()
+  print('INTERP gdas elapsed = %7.2f' % ((toc_gdas - tic_gdas)/60))
+
+  CrIS_gdas_surface_pressure, CrIS_gdas_surface_type, CrIS_gdas_surface_temperature = interpolate_gdas(gdas_match_struct,\
+      CrIS_Latitude.reshape((Number_of_CrIS_FOVs*Number_of_CrIS_FORs)),CrIS_Longitude.reshape((Number_of_CrIS_FOVs*Number_of_CrIS_FORs)))
+
+  CrIS_gdas_surface_type = np.tile(ATMS_gdas_surface_type,(Number_of_CrIS_FOVs,1)).T
+  CrIS_gdas_surface_type = CrIS_gdas_surface_type.reshape((Number_of_CrIS_FOVs*Number_of_CrIS_FORs))
+
+  #---angle to signed angle
+  iSide5 = (CrIS_Satellite_Zenith[:,4] < 0)
+  ATMS_Satellite_Zenith[iSide5] = -1*ATMS_Satellite_Zenith[iSide5]
+  iSide = (CrIS_Satellite_Zenith < 0)
+  CrIS_Satellite_Zenith[iSide] = -1*CrIS_Satellite_Zenith[iSide]
+  
+  #---longitude from (-180,180) to (0,360)
+  iLon = (ATMS_Longitude < 0)
+  ATMS_Longitude[iLon] = ATMS_Longitude[iLon] + 360
+  iLon = (CrIS_Longitude < 0)
+  CrIS_Longitude[iLon] = CrIS_Longitude[iLon] + 360
+  
+  #print ATMS_gdas_surface_pressure.shape, ATMS_Longitude.shape  
+  print('ATMS Psurf = ', np.min(ATMS_gdas_surface_pressure),np.max(ATMS_gdas_surface_pressure))
+  print('CrIS Psurf = ', np.min(CrIS_gdas_surface_pressure),np.max(CrIS_gdas_surface_pressure))
+  print('ATMS SFCTP = ', np.min(ATMS_gdas_surface_type),np.max(ATMS_gdas_surface_type))
+  print('CrIS SFCTP = ', np.min(CrIS_gdas_surface_type),np.max(CrIS_gdas_surface_type))
+
+  ###############
+  #---reshape variables and write to AI files disk
+  ###############
+  tic_write = time.time()
+  #---write out CrIS file 
+  nProfiles = Number_of_CrIS_FOVs*Number_of_CrIS_FORs
+  rShape1D = (nProfiles,1)
+  rShape2D = (nProfiles,Number_of_CrIS_Channels)
+
+  CrIS_Brightness_Temps = CrIS_Brightness_Temps.reshape(rShape2D)
+  Index_Bad_Collocation = (CrIS_gdas_surface_pressure < 0) | (CrIS_gdas_surface_pressure > 1100)
+  CrIS_Brightness_Temps[Index_Bad_Collocation,:] = REAL32_UNDEF
+
+  nEOF     = 145; nAnc     = 3; nPredictor = Number_of_CrIS_Channels
+  nEDRs    = 3
+  Targets  = np.zeros((nProfiles,nEOF), dtype=np.float32)
+  Tscale   = np.zeros((nEOF), dtype=np.float32)
+  LogFlag  = np.zeros((nEOF), dtype=np.int32)
+  #print('shae=', CrIS_Brightness_Temps.shape)
+  Predictors = np.c_[CrIS_Brightness_Temps.reshape(rShape2D), CrIS_Latitude.reshape(rShape1D), \
+                     CrIS_gdas_surface_pressure.reshape(rShape1D), CrIS_Satellite_Zenith.reshape(rShape1D)]
+  #Xm%ScanDay + Xm%ScanUTC/(3600.*24.)
+  Time = Satellite_Julday + Satellite_UTC/(3600.*24.)
+  
+  Sensor_ids = ['j01_cris']; nSensors = 1; Sensors_Nchan = np.array([Number_of_CrIS_Channels])
+
+  AIFileOut_CrIS = AIFileOut + '_%s.atm' % (Sensor_ids[0])
+  print('...Writing CrIS AI Input File: %s' % (AIFileOut_CrIS))
+  write_ai(AIFileOut_CrIS,nProfiles,Number_of_CrIS_Channels,nEOF,nAnc,nEDRs,nPredictor,Predictors,Targets,Tscale,LogFlag,CrIS_gdas_surface_type,
+           CrIS_Longitude.reshape(rShape1D),CrIS_Latitude.reshape(rShape1D),Time,CrIS_gdas_surface_pressure,nSensors,Sensor_ids,Sensors_Nchan)
+
+  #---write out ATMS file 
+  nProfiles = Number_of_CrIS_FORs
+  rShape2D = (nProfiles,Number_of_ATMS_Channels)
+  rShape1D = (nProfiles,1)
+
+  nEOF     = 145; nAnc     = 3; nPredictor = Number_of_ATMS_Channels
+  Index_Bad_Collocation = (ATMS_gdas_surface_pressure < 0) | (ATMS_gdas_surface_pressure > 1100)
+  ATMS_Brightness_Temps = ATMS_Brightness_Temps.reshape(rShape2D)
+  ATMS_Brightness_Temps[Index_Bad_Collocation,:] = REAL32_UNDEF
+
+  #---mark bad QC on ATMS
+  Index_Bad_QC = (ATMS_QF1 > 0) | (ATMS_QF2 > 0)
+  ATMS_Brightness_Temps[Index_Bad_QC] = REAL32_UNDEF
+ 
+  print("SHAPES = ", ATMS_Brightness_Temps.shape,ATMS_Latitude.shape,ATMS_gdas_surface_pressure.shape,ATMS_Satellite_Zenith.shape)
+  Predictors = np.c_[ATMS_Brightness_Temps, ATMS_Latitude.reshape(rShape1D), \
+                     ATMS_gdas_surface_pressure.reshape(rShape1D), ATMS_Satellite_Zenith.reshape(rShape1D)]
+  Targets  = np.zeros((nProfiles,nEOF), dtype=np.float32) 
+  Tscale   = np.zeros((nEOF), dtype=np.float32)
+  LogFlag  = np.zeros((nEOF), dtype=np.int32)
+  Time_ATMS = (Satellite_Julday[:,5] + Satellite_UTC[:,5]/(3600.*24.)).squeeze()
+  Sensor_ids = ['j01_atms']; nSensors = 1; Sensors_Nchan = np.array([Number_of_ATMS_Channels])
+  
+  AIFileOut_ATMS = AIFileOut + '_%s.atm' % (Sensor_ids[0])
+  print('...Writing ATMS AI Input File: %s' % (AIFileOut_ATMS))
+  write_ai(AIFileOut_ATMS,nProfiles,Number_of_ATMS_Channels,nEOF,nAnc,nEDRs,nPredictor,Predictors,Targets,Tscale,LogFlag,ATMS_gdas_surface_type,
+           ATMS_Longitude,ATMS_Latitude,Time_ATMS,ATMS_gdas_surface_pressure,nSensors,Sensor_ids,Sensors_Nchan)
+
+  #---write combined file 
+  nProfiles = Number_of_CrIS_FOVs*Number_of_CrIS_FORs
+  rShape1D = (nProfiles,1)
+  rShape2D = (nProfiles,Number_of_CrIS_Channels)
+
+  #---replicate ATMS Brightness Temps 9 times over each CrIS FOV
+  ATMS_Brightness_Temps_CrIS = np.zeros((nProfiles, Number_of_ATMS_Channels), dtype=np.float32)
+  for iFOR in range(0,Number_of_CrIS_FORs):
+    index_FOV = np.arange(Number_of_CrIS_FOVs) + iFOR*Number_of_CrIS_FOVs  
+    ATMS_Brightness_Temps_CrIS[index_FOV,:] = ATMS_Brightness_Temps[iFOR,:]
+  
+  nEOF     = 145; nAnc     = 4; nPredictor = Number_of_CrIS_Channels + Number_of_ATMS_Channels
+  nEDRs    = 3
+  Targets  = np.zeros((nProfiles,nEOF), dtype=np.float32) + 10
+  Tscale   = np.zeros((nEOF), dtype=np.float32)
+  LogFlag  = np.zeros((nEOF), dtype=np.int32)
+
+  print('RESHAPE = ',rShape1D,CrIS_Latitude.shape,CrIS_gdas_surface_pressure.shape,
+        CrIS_Satellite_Zenith.shape,ATMS_Satellite_Zenith.shape,CrIS_gdas_surface_pressure.shape)
+  print('RESHAPE = ',rShape2D,CrIS_Brightness_Temps.shape)
+
+  ATMS_Satellite_Zenith_Rep = np.tile(ATMS_Satellite_Zenith,(Number_of_CrIS_FOVs,1)).T
+
+  Predictors = np.c_[ATMS_Brightness_Temps_CrIS, CrIS_Brightness_Temps.reshape(rShape2D), CrIS_Latitude.reshape(rShape1D), \
+                     CrIS_gdas_surface_pressure.reshape(rShape1D), CrIS_Satellite_Zenith.reshape(rShape1D), ATMS_Satellite_Zenith_Rep.reshape(rShape1D)]
+  
+  #Xm%ScanDay + Xm%ScanUTC/(3600.*24.)
+  Time = Satellite_Julday + Satellite_UTC/(3600.*24.)
+
+  Sensor_ids = ['j01_atms','j01_cris']; nSensors = 2; Sensors_Nchan = np.array([Number_of_ATMS_Channels,Number_of_CrIS_Channels])
+
+  AIFileOut_ATMS_CrIS = AIFileOut + '_%s_%s.atm' % (Sensor_ids[0],Sensor_ids[1])
+  print('...Writing ATMS_CrIS AI Input File: %s' % (AIFileOut_ATMS_CrIS))
+  write_ai(AIFileOut_ATMS_CrIS,nProfiles,Number_of_CrIS_Channels+Number_of_ATMS_Channels,nEOF,nAnc,nEDRs,nPredictor,Predictors,Targets,Tscale,LogFlag,\
+           CrIS_gdas_surface_type,CrIS_Longitude.reshape(rShape1D),CrIS_Latitude.reshape(rShape1D),Time,CrIS_gdas_surface_pressure,\
+           nSensors,Sensor_ids,Sensors_Nchan)
+
+  toc_write = time.time()
+  print('Write prep elapsed = %7.2f' % ((toc_write - tic_write)/60))
+  print('Total prep elapsed = %7.2f' % ((toc_write - tic)/60))
+
+  if debug:
+   
+   import matplotlib 
+   matplotlib.use('Agg')
+   vmin = 500; vmax = 1000.
+   import matplotlib.pyplot as plt
+   def make_plot(Latitude, Longitude, Var, vmin, vmax, imgName, cmap=plt.cm.viridis ):
+    #---make some debugging plots
+    size = 0.01
+    plt.scatter(Longitude, Latitude, s=size, c=Var, vmin=vmin, vmax=vmax)
+    plt.xlim([0.,360.])
+    plt.ylim([-90.,90.])
+    plt.savefig(imgName)
+    plt.clf()
+    plt.close()
+
+   make_plot(ATMS_Latitude, ATMS_Longitude, ATMS_gdas_surface_pressure, vmin, vmax, 'ATMS_PS.png')
+   def discrete_cmap(N, base_cmap=None):
+    """Create an N-bin discrete colormap from the specified input map"""
+
+    # Note that if base_cmap is a string or None, you can simply do
+    #    return plt.cm.get_cmap(base_cmap, N)
+    # The following works for string, None, or a colormap instance:
+
+    base = plt.cm.get_cmap(base_cmap)
+    color_list = base(np.linspace(0, 1, N))
+    cmap_name = base.name + str(N)
+    return base.from_list(cmap_name, color_list, N)
+
+   make_plot(ATMS_Latitude, ATMS_Longitude, ATMS_gdas_surface_type, 0, 3, 'ATMS_SFCT2.png', cmap=plt.cm.tab10)
+
+   make_plot(CrIS_Latitude.reshape((Number_of_CrIS_FOVs*Number_of_CrIS_FORs)), \
+             CrIS_Longitude.reshape((Number_of_CrIS_FOVs*Number_of_CrIS_FORs)), \
+             CrIS_gdas_surface_type, 0, 3, 'CrIS_SFCT.png', cmap=plt.cm.tab10)
+
+   make_plot(CrIS_Latitude.reshape((Number_of_CrIS_FOVs*Number_of_CrIS_FORs)), \
+             CrIS_Longitude.reshape((Number_of_CrIS_FOVs*Number_of_CrIS_FORs)), \
+             CrIS_gdas_surface_pressure, vmin, vmax, 'CrIS_PS.png')
+   vmin = 200.; vmax = 310.
+   make_plot(CrIS_Latitude.reshape((Number_of_CrIS_FOVs*Number_of_CrIS_FORs)), \
+             CrIS_Longitude.reshape((Number_of_CrIS_FOVs*Number_of_CrIS_FORs)), \
+             CrIS_Brightness_Temps[:,250].squeeze().reshape((Number_of_CrIS_FOVs*Number_of_CrIS_FORs)), vmin, vmax, 'CrIS_TB.png')
+
+NetCDFFile     ='/data/users/narges/for_eric/NUCAPS/NUCAPS-ALL-HR_v2r0_j01_s201906062359039_e201906062359337_c201906070043230.nc'
+NetCDFFiles     =sorted(glob.glob('/data/users/emaddy/cris_fsr/src/netcdf_read/python/nctest/*nc'))
+
+instrConfigFile='/data/users/emaddy/tools/coat/data/static/InstrConfigInfo/InstrConfig_npp_crisfsr.dat'
+#---1.00deg x 1.00deg
+gdas_type = 0
+#---0.25deg x 0.25deg
+gdas_type = 1
+gdas_dump_dir = '/data/users/emaddy/cris_fsr/src/netcdf_read/python/data_test/dump_gdas/'
+AIFileOut     = '/data/users/emaddy/cris_fsr/src/netcdf_read/data/aifile'
+
+NetCDFFile_List = sys.argv[1]
+print("NetCDFFile_List = ", NetCDFFile_List)
+instrConfigFile = sys.argv[2]
+print("instrConfigFile = ", instrConfigFile)
+gdas_type = int(sys.argv[3])
+print("gdas_type       = ", gdas_type)
+gdas_dump_dir = sys.argv[4]
+print("gdas_dump_dir   = ", gdas_dump_dir)
+channelSetFile = sys.argv[5]
+print("ChannelSet Pkl  = ", channelSetFile)
+AIFileOut = sys.argv[6]
+print("AIFileOut       = ", AIFileOut)
+
+def read_list(FileList):
+  files = []
+  fid = open(FileList,'r')
+  flines = fid.readlines()
+  for fline in flines:
+    files.append(fline.strip())
+  return files  
+
+NetCDFFiles = read_list(NetCDFFile_List)
+nFiles = len(NetCDFFiles)
+debug_flag = False
+main(NetCDFFiles,instrConfigFile,gdas_type,gdas_dump_dir,channelSetFile,AIFileOut,debug=debug_flag)
+
+

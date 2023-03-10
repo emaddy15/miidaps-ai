@@ -1,0 +1,100 @@
+
+#------------------------------- 
+#---path to MIIDAPS-AI package
+#------------------------------- 
+export MIIDAPSAI_PATH=/data/data086/emaddy/miidaps-ai/
+
+#------------------------------- 
+#---path to training datasets (atm, cloud, emis)
+#------------------------------- 
+export TRAININGDATA_PATH=${MIIDAPSAI_PATH}/data/ai_train_data/
+
+#------------------------------- 
+#---path to saved models dataset (atm, cloud, emis)
+#------------------------------- 
+export AIMODELDATA_PATH=${MIIDAPSAI_PATH}/data/ai_model_data/
+
+#------------------------------- 
+#---path to AI fix files (static)
+#------------------------------- 
+export AIFIXDATA_PATH=${MIIDAPSAI_PATH}/data/ai_fix_data/
+
+#------------------------------- 
+#---path to AI prep Tuning Params
+#------------------------------- 
+export AITUNEDATA_PATH=${MIIDAPSAI_PATH}/data/ai_fix_data/
+#export AITUNEDATA_PATH=${MIIDAPSAI_PATH}/data/TunParams/
+
+#------------------------------- 
+#---scripts paths
+#------------------------------- 
+export SCRIPTSRC_PATH=${MIIDAPSAI_PATH}/scripts
+export PREPROCESSING_PATH=${SCRIPTSRC_PATH}/preprocessing
+export POSTPROCESSING_PATH=${SCRIPTSRC_PATH}/postprocessing
+export INFERENCERUN_PATH=${SCRIPTSRC_PATH}/inference
+
+#------------------------------- 
+#---python scripts paths
+#------------------------------- 
+export PYTHONSRC_PATH=${MIIDAPSAI_PATH}/src/python
+export PYTHON_PREP_PATH=${PYTHONSRC_PATH}/preprocessing
+export PYTHON_POST_PATH=${PYTHONSRC_PATH}/postprocessing
+export PYTHON_IO_PATH=${PYTHONSRC_PATH}/io
+export PYTHON_RUN_PATH=${PYTHONSRC_PATH}/inference
+
+export PYTHONPATH=
+export PYTHONPATH=${PYTHONSRC_PATH}/:${PYTHON_PREP_PATH}/:${PYTHON_POST_PATH}/:${PYTHON_RUN_PATH}/:${PYTHON_IO_PATH}/
+
+#------------------------------- 
+#------- PYTHON 3 TESTING
+#------------------------------- 
+export PYTHON_VERSION=3
+export PYTHON_PKG_PATH=/data/data086/emaddy/anaconda3/
+export PYTHON=${PYTHON_PKG_PATH}/bin/python 
+
+#---activate conda environment (if built)
+export CONDA_ENV=${PYTHON_PKG_PATH}/envs/miidaps-ai_test
+source ${PYTHON_PKG_PATH}/bin/activate ${CONDA_ENV}
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${PYTHON_PKG_PATH}/lib
+
+export INPUTDATA_PATH=/data/data086/emaddy/miidaps-ai_proc3a/Input
+export OUTPUTDATA_PATH=/data/data086/emaddy/miidaps-ai_proc3a/Output
+export NUCAPSDATA_PATH=/data/data086/emaddy/cris_fsr/nucaps_data/
+
+export INPUTDATA_PATH=/data/data086/emaddy/miidaps-ai_proc3/Input
+export OUTPUTDATA_PATH=/data/data086/emaddy/miidaps-ai_proc3/Output
+export NUCAPSDATA_PATH=/data/data086/emaddy/nucaps_data/
+
+#------------------------------- 
+#---wgrib2 
+#------------------------------- 
+export WGRIB2_CMD=/data/starfs1/utils/wgrib2-v2.0.8/wgrib2 
+
+#------------------------------- 
+#---get GDAS command
+#   use rsync for instance for local locations
+#------------------------------- 
+export WGETCMD="rsync -avz"
+export WGETCMD="/data/data086/emaddy/bin/wget -r -nd -nc"
+#export WGETCMD="/data/data002/pub/nsun/libs/ncftp-3.2.5/bin/ncftpget "
+
+#------------------------------- 
+#---location of gdas data
+#------------------------------- 
+export URL=ftp://ftp.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/
+#---for ncftpget
+#export URL=" ftp.ncep.noaa.gov /pub/data/nccf/com/gfs/prod"
+
+#---submission type and settings
+#------------------------------- 
+export SUBMIT=SLURM
+export PARTITION=s4
+export QOS=s4
+export WALLTIME=06:00:00
+
+export SUBMIT=LINUX
+export PARTITION=s4
+export QOS=s4
+export WALLTIME=06:00:00
+
+#export HDF5_USE_FILE_LOCKING=FALSE
